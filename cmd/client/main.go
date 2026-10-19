@@ -26,7 +26,8 @@ func main() {
 			Request: "POST /echo HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n" +
 				"Transfer-Encoding: chunked\r\n\r\n" +
-				"5\r\nhello\r\n0\r\n\r\n",
+				"5\r\nhello\r\n" +
+				"0\r\n\r\n",
 			Expected: `Body: "hello", State: COMPLETE`,
 		},
 		{
@@ -50,8 +51,8 @@ func main() {
 			Expected: `Body: "", State: COMPLETE`,
 		},
 		{
-			Name:        "TC-04: Newlines inside body",
-			Description: "Newline characters are body data",
+			Name:        "TC-04: Newlines inside chunk data",
+			Description: "Newline characters inside chunk data must be treated as body bytes",
 			Request: "POST /echo HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n" +
 				"Transfer-Encoding: chunked\r\n\r\n" +
@@ -73,7 +74,7 @@ func main() {
 		},
 		{
 			Name:        "TC-06: Invalid chunk size",
-			Description: "Invalid hexadecimal size",
+			Description: "Chunk size is not valid hexadecimal",
 			Request: "POST /echo HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n" +
 				"Transfer-Encoding: chunked\r\n\r\n" +
@@ -83,7 +84,7 @@ func main() {
 		},
 		{
 			Name:        "TC-07: Invalid chunk terminator",
-			Description: "Chunk data is not followed by CRLF",
+			Description: "Chunk data must be followed by CRLF",
 			Request: "POST /echo HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n" +
 				"Transfer-Encoding: chunked\r\n\r\n" +
@@ -93,7 +94,7 @@ func main() {
 		},
 		{
 			Name:        "TC-08: Incomplete chunk",
-			Description: "Declared 10 bytes but only 5 supplied",
+			Description: "Declared 10 bytes but only 5 are currently available",
 			Request: "POST /echo HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n" +
 				"Transfer-Encoding: chunked\r\n\r\n" +
@@ -102,11 +103,43 @@ func main() {
 		},
 
 		// ==========================================
+		// CASE-INSENSITIVE HEADER NAMES
+		// ==========================================
+		{
+			Name:        "TC-09: Lowercase Content-Length",
+			Description: "HTTP field names are case-insensitive",
+			Request: "POST /echo HTTP/1.1\r\n" +
+				"Host: localhost:4000\r\n" +
+				"content-length: 5\r\n\r\n" +
+				"hello",
+			Expected: `Body: "hello", State: COMPLETE`,
+		},
+		{
+			Name:        "TC-10: Uppercase Content-Length",
+			Description: "Uppercase field name must behave like Content-Length",
+			Request: "POST /echo HTTP/1.1\r\n" +
+				"Host: localhost:4000\r\n" +
+				"CONTENT-LENGTH: 5\r\n\r\n" +
+				"hello",
+			Expected: `Body: "hello", State: COMPLETE`,
+		},
+		{
+			Name:        "TC-11: Mixed-case Transfer-Encoding",
+			Description: "Transfer-Encoding field name is case-insensitive",
+			Request: "POST /echo HTTP/1.1\r\n" +
+				"Host: localhost:4000\r\n" +
+				"tRaNsFeR-EnCoDiNg: chunked\r\n\r\n" +
+				"5\r\nhello\r\n" +
+				"0\r\n\r\n",
+			Expected: `Body: "hello", State: COMPLETE`,
+		},
+
+		// ==========================================
 		// CONTENT-LENGTH
 		// ==========================================
 		{
-			Name:        "TC-09: Simple Content-Length",
-			Description: "Body of exactly 5 bytes",
+			Name:        "TC-12: Exact Content-Length",
+			Description: "Exactly five body octets are supplied",
 			Request: "POST /echo HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n" +
 				"Content-Length: 5\r\n\r\n" +
@@ -114,88 +147,155 @@ func main() {
 			Expected: `Body: "hello", State: COMPLETE`,
 		},
 		{
-			Name:        "TC-10: JSON body",
-			Description: "Body containing JSON",
+			Name:        "TC-13: JSON body",
+			Description: "Content-Length counts octets of the body",
 			Request: "POST /echo HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n" +
 				"Content-Type: application/json\r\n" +
 				"Content-Length: 16\r\n\r\n" +
 				`{"name":"Nazar"}`,
-			Expected: `Body: {"name":"Nazar"}, State: COMPLETE`,
+			Expected: `Body: "{\"name\":\"Nazar\"}", State: COMPLETE`,
 		},
 		{
-			Name:        "TC-11: Content-Length zero",
-			Description: "Explicitly empty body",
+			Name:        "TC-14: Content-Length zero",
+			Description: "Explicit zero-length body",
 			Request: "POST /echo HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n" +
 				"Content-Length: 0\r\n\r\n",
 			Expected: `Body: "", State: COMPLETE`,
 		},
 		{
-			Name:        "TC-12: Body shorter than Content-Length",
-			Description: "Declared 10 bytes, sent only 5",
+			Name:        "TC-15: Incomplete Content-Length body",
+			Description: "Declared 10 bytes but only 5 have arrived",
 			Request: "POST /echo HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n" +
 				"Content-Length: 10\r\n\r\n" +
 				"hello",
-			Expected: "Parser waits for more bytes",
+			Expected: "Parser waits for 5 more body bytes",
 		},
 		{
-			Name:        "TC-13: Body longer than Content-Length",
-			Description: "Declared 3 bytes, sent 5",
+			Name:        "TC-16: Bytes after Content-Length body",
+			Description: "Bytes after the declared body belong to subsequent input, not this body",
 			Request: "POST /echo HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n" +
-				"Content-Length: 3\r\n\r\n" +
-				"hello",
-			Expected: "First body contains hel; extra lo remains unread",
+				"Content-Length: 5\r\n\r\n" +
+				"hello" +
+				"GET /next HTTP/1.1\r\n" +
+				"Host: localhost:4000\r\n\r\n",
+			Expected: `First Body: "hello", State: COMPLETE; remaining bytes begin with "GET /next"`,
 		},
 		{
-			Name:        "TC-14: Invalid Content-Length",
-			Description: "Non-numeric Content-Length",
+			Name:        "TC-17: Invalid Content-Length text",
+			Description: "Content-Length must contain a valid decimal length",
 			Request: "POST /echo HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n" +
 				"Content-Length: abc\r\n\r\n" +
 				"hello",
 			Expected: "Parser error: invalid Content-Length",
 		},
+		{
+			Name:        "TC-18: Negative Content-Length",
+			Description: "Negative Content-Length is invalid",
+			Request: "POST /echo HTTP/1.1\r\n" +
+				"Host: localhost:4000\r\n" +
+				"Content-Length: -5\r\n\r\n" +
+				"hello",
+			Expected: "Parser error: invalid Content-Length",
+		},
+		{
+			Name:        "TC-19: Empty Content-Length",
+			Description: "Empty Content-Length value is invalid",
+			Request: "POST /echo HTTP/1.1\r\n" +
+				"Host: localhost:4000\r\n" +
+				"Content-Length:\r\n\r\n",
+			Expected: "Parser error: invalid Content-Length",
+		},
 
 		// ==========================================
-		// NO CONTENT
+		// REQUEST WITHOUT BODY FRAMING
 		// ==========================================
 		{
-			Name:        "TC-15: GET without body",
-			Description: "No Content-Length or Transfer-Encoding",
+			Name:        "TC-20: GET without body",
+			Description: "No Content-Length and no Transfer-Encoding means request body length is zero",
 			Request: "GET /users HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n\r\n",
 			Expected: `Body: "", State: COMPLETE`,
 		},
 		{
-			Name:        "TC-16: DELETE without body",
-			Description: "DELETE request without body",
+			Name:        "TC-21: DELETE without body",
+			Description: "Body framing does not depend on method name",
 			Request: "DELETE /users/1 HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n\r\n",
 			Expected: `Body: "", State: COMPLETE`,
 		},
 		{
-			Name:        "TC-17: POST without framing headers",
-			Description: "POST without body framing",
+			Name:        "TC-22: POST without body",
+			Description: "POST also has zero body when no framing header is present",
 			Request: "POST /echo HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n\r\n",
 			Expected: `Body: "", State: COMPLETE`,
 		},
 		{
-			Name:        "TC-18: Body without framing headers",
-			Description: "Unexpected bytes after a complete request",
+			Name:        "TC-23: Data after unframed request",
+			Description: "Without body framing, bytes after headers must not become this request's body",
 			Request: "POST /echo HTTP/1.1\r\n" +
 				"Host: localhost:4000\r\n\r\n" +
-				"hello",
-			Expected: "Body remains empty; extra bytes cannot be used as this request's body",
+				"GET /next HTTP/1.1\r\n" +
+				"Host: localhost:4000\r\n\r\n",
+			Expected: `First Body: "", State: COMPLETE; remaining bytes begin with "GET /next"`,
+		},
+
+		// ==========================================
+		// CONTENT-LENGTH + TRANSFER-ENCODING CONFLICT
+		// ==========================================
+		{
+			Name:        "TC-24: Content-Length and Transfer-Encoding",
+			Description: "Request contains both framing mechanisms and must be rejected by this implementation",
+			Request: "POST /echo HTTP/1.1\r\n" +
+				"Host: localhost:4000\r\n" +
+				"Content-Length: 5\r\n" +
+				"Transfer-Encoding: chunked\r\n\r\n" +
+				"5\r\nhello\r\n" +
+				"0\r\n\r\n",
+			Expected: "Parser error: Content-Length and Transfer-Encoding conflict",
+		},
+		{
+			Name:        "TC-25: Transfer-Encoding before Content-Length",
+			Description: "Detection must not depend on header order",
+			Request: "POST /echo HTTP/1.1\r\n" +
+				"Host: localhost:4000\r\n" +
+				"Transfer-Encoding: chunked\r\n" +
+				"Content-Length: 5\r\n\r\n" +
+				"5\r\nhello\r\n" +
+				"0\r\n\r\n",
+			Expected: "Parser error: Content-Length and Transfer-Encoding conflict",
+		},
+		{
+			Name:        "TC-26: Conflict with mixed header casing",
+			Description: "Conflict detection must also use case-insensitive field names",
+			Request: "POST /echo HTTP/1.1\r\n" +
+				"Host: localhost:4000\r\n" +
+				"content-length: 5\r\n" +
+				"TRANSFER-ENCODING: chunked\r\n\r\n" +
+				"5\r\nhello\r\n" +
+				"0\r\n\r\n",
+			Expected: "Parser error: Content-Length and Transfer-Encoding conflict",
+		},
+		{
+			Name:        "TC-27: No body",
+			Description: "Request doesn't include body",
+			Request: "GET /echo HTTP/1.1\r\n" +
+				"Host: localhost:4000\r\n" +
+				"\r\n",
+			Expected: "OK",
 		},
 	}
 
-	for _, tc := range tests {
-		runTest(tc)
+	// for i := 0; i < 1; i++ {
+	for i := 0; i < len(tests); i++ {
+		runTest(tests[i])
 	}
+
 }
 
 func runTest(tc TestCase) {

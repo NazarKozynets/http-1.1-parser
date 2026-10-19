@@ -61,7 +61,11 @@ func handleConnection(conn net.Conn, p *parser) error {
 		}
 
 		if p.state == stateComplete {
-			conn.Write([]byte("Ok"))
+			if len(p.request.Body) > 0 {
+				conn.Write(p.request.Body)
+			} else {
+				conn.Write([]byte("OK"))
+			}
 			break
 		}
 	}

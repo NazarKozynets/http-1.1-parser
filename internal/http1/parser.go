@@ -40,76 +40,111 @@ type parser struct {
 // MAIN PARSER ORCHESTRATOR
 func (p *parser) parseHttpRequest(chunk []byte) error {
 	p.buffer = append(p.buffer, chunk...)
-	chunkLength := len(chunk)
 
-	if p.state == stateBody && (p.bodyParsingMethod == unknown || p.bodyParsingMethod == noContent) && chunkLength == 0 {
-		fmt.Printf("Headers include 'Content-Length' or 'Transfer-Encoding: chunked', but body is empty. Selected body framing method: %s", p.bodyParsingMethod)
-		return errors.New("Invalid body.")
-	}
+	bytesLeft := len(chunk)
 
-	for chunkLength > 0 {
+	for {
 		switch p.state {
+
 		case stateMethod, statePath, stateProtocol:
-			bytesLeft, parseRequestLineError := p.parseRequestLine(chunkLength)
-			if parseRequestLineError != nil {
-				return parseRequestLineError
+			if bytesLeft == 0 {
+				return nil
 			}
 
-			chunkLength = bytesLeft
+			remaining, err := p.parseRequestLine(bytesLeft)
+			if err != nil {
+				return err
+			}
+
+			bytesLeft = remaining
+
 		case stateHeaders:
-			bytesLeft, headersErr := p.parseHeaders(chunkLength)
-			if headersErr != nil {
-				return headersErr
+			if bytesLeft == 0 {
+				return nil
 			}
 
-			if p.state == stateBody && bytesLeft == 0 {
-				chunkLength = 1
-			} else {
-				chunkLength = bytesLeft
+			remaining, err := p.parseHeaders(bytesLeft)
+			if err != nil {
+				return err
 			}
+
+			bytesLeft = remaining
+
 		case stateBody:
-			// If request headers at this moment don't include 'Content-Length' or 'Transfer-Encoding: chunked' headers
-			// then skip 'stateBody' and increment to the next state.
 			if p.bodyParsingMethod == unknown {
-				parsingMethod, getParsingMethodError := p.bodyParsingMethod.getBodyParsingMethod(p.request.Headers)
-				if getParsingMethodError != nil {
-					return getParsingMethodError
+				method, err := p.bodyParsingMethod.getBodyParsingMethod(
+					p.request.Headers,
+				)
+				if err != nil {
+					return err
 				}
 
-				p.bodyParsingMethod = parsingMethod
+				p.bodyParsingMethod = method
 			}
 
-			if p.bodyParsingMethod == noContent {
-				// Handling for cases where none of the suitable headers were passed,
-				// but a body was provided.
-				if chunkLength > 0 {
-					return errors.New("Request contains body but headers don't include 'Content-Length' or 'Transfer-Encoding: chunked'.")
-				}
+			switch p.bodyParsingMethod {
 
-				p.state++
+			case noContent:
+				p.state = stateComplete
 				continue
-			}
-			if p.bodyParsingMethod == contentLength {
-				bodyError := p.parseBodyByContentLength(chunkLength)
-				if bodyError != nil {
-					return bodyError
+
+			case contentLength:
+				specified, err := strconv.Atoi(
+					p.request.Headers["content-length"],
+				)
+
+				if err != nil || specified < 0 {
+					return errors.New("Invalid Content-Length")
 				}
 
-				chunkLength = 0
-			}
-			if p.bodyParsingMethod == transferEncoding {
-				bytesLeft, bodyError := p.parseBodyByChunks(chunkLength)
-				if bodyError != nil {
-					return bodyError
+				if specified == 0 {
+					p.state = stateComplete
+					continue
 				}
 
-				chunkLength = bytesLeft
+				if bytesLeft == 0 {
+					return nil
+				}
+
+				if err := p.parseBodyByContentLength(bytesLeft); err != nil {
+					return err
+				}
+
+				bytesLeft = 0
+
+			case transferEncoding:
+				if bytesLeft == 0 {
+					return nil
+				}
+
+				remaining, err := p.parseBodyByChunks(bytesLeft)
+				if err != nil {
+					return err
+				}
+
+				bytesLeft = remaining
+
+			default:
+				return errors.New("unsupported body parsing method")
 			}
+
+			if p.state == stateBody {
+				return nil
+			}
+
 		case stateComplete:
+			return nil
+
+		default:
+			return errors.New("invalid parser state")
+		}
+
+		if bytesLeft == 0 &&
+			p.state != stateBody &&
+			p.state != stateComplete {
 			return nil
 		}
 	}
-	return nil
 }
 
 // Method, Path, Protocol
@@ -162,7 +197,7 @@ func (p *parser) parseHeaders(chunkLength int) (bytesLeft int, parseHeadersError
 						return 0, err
 					}
 
-					p.request.Headers[key] = value
+					p.request.Headers[strings.ToLower(key)] = strings.ToLower(value)
 					p.fieldStart = p.scanPos + 1
 				}
 			}
@@ -173,37 +208,74 @@ func (p *parser) parseHeaders(chunkLength int) (bytesLeft int, parseHeadersError
 	return 0, nil
 }
 
-func (p *bodyParsingMethod) getBodyParsingMethod(headers map[string]string) (parsingMethod bodyParsingMethod, getParsingMethodError error) {
-	if _, contentLengthExists := headers["Content-Length"]; contentLengthExists {
-		return contentLength, nil
+func (m bodyParsingMethod) getBodyParsingMethod(
+	headers map[string]string,
+) (bodyParsingMethod, error) {
+
+	contentLengthValue, hasContentLength := headers["content-length"]
+	transferEncodingValue, hasTransferEncoding := headers["transfer-encoding"]
+
+	if hasContentLength && hasTransferEncoding {
+		return unknown, errors.New(
+			"Content-Length and Transfer-Encoding conflict",
+		)
 	}
-	if transferEncodingValue, transferEncodingExists := headers["Transfer-Encoding"]; transferEncodingExists {
-		if transferEncodingValue != "chunked" {
-			return unknown, errors.New("Unsupported 'Transfer-Encoding' method was provided.")
+
+	if hasTransferEncoding {
+		if !strings.EqualFold(
+			strings.TrimSpace(transferEncodingValue),
+			"chunked",
+		) {
+			return unknown, errors.New(
+				"Unsupported Transfer-Encoding",
+			)
 		}
 
 		return transferEncoding, nil
 	}
+
+	if hasContentLength {
+		specified, err := strconv.Atoi(contentLengthValue)
+
+		if err != nil || specified < 0 {
+			return unknown, errors.New("Invalid Content-Length")
+		}
+
+		return contentLength, nil
+	}
+
 	return noContent, nil
 }
 
 // Body by 'Content-Length' header
-func (p *parser) parseBodyByContentLength(chunkLength int) (parseBodyError error) {
-	specifiedContentLength, contentLengthParseError := strconv.Atoi(p.request.Headers["Content-Length"])
-	if contentLengthParseError != nil {
-		fmt.Printf("Can't parse Content-Length value. Current string value: %s.", p.request.Headers["Content-Length"])
-		return errors.New("Invalid request header 'Content-Length' value.")
+func (p *parser) parseBodyByContentLength(chunkLength int) error {
+	specified, err := strconv.Atoi(p.request.Headers["content-length"])
+	if err != nil || specified < 0 {
+		return errors.New("Invalid Content-Length")
 	}
 
-	if chunkLength+len(p.request.Body) > specifiedContentLength {
-		fmt.Printf("Provided body (%d bytes) larger than specified 'Content-Length' (%d bytes).", chunkLength+len(p.request.Body), specifiedContentLength)
-		return errors.New("Provided body larger than specified 'Content-Length'.")
+	remaining := specified - len(p.request.Body)
+
+	if remaining < 0 {
+		return errors.New("Body exceeds Content-Length")
 	}
 
-	p.request.Body = append(p.request.Body, p.buffer[p.scanPos+1:p.scanPos+chunkLength+1]...)
-	p.scanPos += chunkLength
+	if chunkLength < 0 ||
+		p.scanPos < 0 ||
+		p.scanPos+chunkLength > len(p.buffer) {
+		return errors.New("Invalid buffer bounds")
+	}
 
-	if len(p.request.Body) == specifiedContentLength {
+	bytesToRead := min(chunkLength, remaining)
+
+	p.request.Body = append(
+		p.request.Body,
+		p.buffer[p.scanPos:p.scanPos+bytesToRead]...,
+	)
+
+	p.scanPos += bytesToRead
+
+	if len(p.request.Body) == specified {
 		p.state++
 	}
 
@@ -211,7 +283,6 @@ func (p *parser) parseBodyByContentLength(chunkLength int) (parseBodyError error
 }
 
 // Body by 'Transfer-Encoding: chunked' header
-
 func (p *parser) parseBodyByChunks(receivedBytesLength int) (bytesLeft int, parseBodyError error) {
 	// fieldStart points to the beginning of the chunk size.
 	// scanPos points to the next unprocessed byte.
