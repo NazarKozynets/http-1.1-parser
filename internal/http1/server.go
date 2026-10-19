@@ -43,7 +43,7 @@ func StartServer() error {
 }
 
 func handleConnection(conn net.Conn, p *parser) error {
-	readBuffer := make([]byte, 32)
+	readBuffer := make([]byte, 16)
 	defer conn.Close()
 
 	for {
@@ -60,8 +60,6 @@ func handleConnection(conn net.Conn, p *parser) error {
 			return parseErr
 		}
 
-		p.printHttpRequest()
-
 		if p.state == stateComplete {
 			conn.Write([]byte("Ok"))
 			break
@@ -69,6 +67,7 @@ func handleConnection(conn net.Conn, p *parser) error {
 	}
 
 	fmt.Println("HTTP/1.1 Request was parsed")
+	p.printHttpRequest()
 
 	return nil
 }
